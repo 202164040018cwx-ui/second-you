@@ -14,6 +14,8 @@ struct OpenDateView: View {
     @State private var currentRoom = 0
     @State private var demo = true
     @State private var open = true
+    @State private var analyzing = false
+    @State private var finishedScan = false
     @State private var instant = false
     @State private var dismissed: Set<UUID> = []
     @State private var alerted: Set<UUID> = []
@@ -26,9 +28,13 @@ struct OpenDateView: View {
         guard let data=UserDefaults.standard.data(forKey:"openDate.matches") else {return []}
         return (try? JSONDecoder().decode([DateProfile].self,from:data))?.filter { !DateProfile.examples.map(\.id).contains($0.id) } ?? []
     }()
-    @State private var demoSaved = [DateProfile.examples[2]]
-    @State private var demoProfile = DateProfile(name:"Sam", interests:["Design","Music"], lookingFor:"Someone to explore with", personality:"Record shops, small concerts, and long walks home.", symbol:"sun.max.fill")
+    @State private var demoSaved = [DateProfile.examples[1], DemoCrowd.people[3]]
+    @State private var demoProfile = DateProfile(name:"Elena", interests:["Design","Music"], lookingFor:"Someone to explore with", occupation:"Graphic designer", education:"BFA in Visual Communication", personality:"I design album covers and spend Sundays digging through used records.", symbol:"sun.max.fill")
     @State private var demoSelfNote = "My favorite part of a concert is the walk home talking about the set. I’d love to meet someone who wants to trade playlists and try a new venue."
+    @AppStorage("openDate.idealPartner") private var idealPartner = ""
+    @State private var demoIdealPartner = "Someone curious and kind who asks follow-up questions, follows through on plans, and can laugh with me when we miss the opening act."
+    @State private var demoIdealDate = "An early set at a small jazz club, then a walk somewhere quiet so we can talk about our favorite song."
+    @AppStorage("openDate.idealDate") private var idealDate = ""
     @State private var demoPortrait = "You enjoy music as a way to get to know someone. A small show with time to talk afterward sounds like your kind of first date."
     @State private var demoMeetingNote = "Remy and I got talking about record shops. We traded favorite albums, and I wanted the conversation to keep going. I’d like to invite them to Sunday's record fair."
     @State private var demoMeetingReflection = "You felt at ease once you had a shared subject. The record fair gives you a specific reason to reconnect. Would you enjoy browsing together even if you came home empty-handed?"
@@ -57,6 +63,7 @@ struct OpenDateView: View {
             return a == b ? $0.profile.name < $1.profile.name : a > b
         }
     }
+    private var recommendations: [Encounter] { nearby.filter { score($0.profile) >= 3 } }
     private var normalizedFloorCode: String { floorCode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
     private func startOnFloor() {
         var advertised = liveProfile
@@ -70,7 +77,7 @@ struct OpenDateView: View {
         guard instant, open, banner == nil, selected == nil, let encounter=candidate else {return}
         banner=encounter.profile; alerted.insert(encounter.id)
         UINotificationFeedbackGenerator().notificationOccurred(.success)
-        let note=UNMutableNotificationContent();note.title=demo ? "Open Date · Demo match" : "Open Date · Nearby match"
+        let note=UNMutableNotificationContent();note.title="Open Date · Suggested profile"
         note.body="Someone nearby shares your preferences. Open the room to see your signal."
         UNUserNotificationCenter.current().getNotificationSettings { settings in
             guard settings.authorizationStatus == .authorized else {return}
@@ -95,10 +102,11 @@ struct OpenDateView: View {
     var body: some View {
         TabView(selection:$tab) {
             discovery.tabItem{Label("Discover",systemImage:"dot.radiowaves.left.and.right")}.tag(0)
-            journal(afterMeeting:false).tabItem{Label("Second You",systemImage:"person.text.rectangle")}.tag(1)
+            secondYou.tabItem{Label("Second You",systemImage:"person.text.rectangle")}.tag(1)
             matches.tabItem{Label("Matches",systemImage:"heart")}.tag(2)
-            journal(afterMeeting:true).tabItem{Label("Analyze",systemImage:"text.bubble")}.tag(3)
+            settings.tabItem{Label("Settings",systemImage:"gearshape")}.tag(3)
         }.tint(rose).preferredColorScheme(.light)
+        .task(id: saved.map(\.id)) { await prepareExchanges() }
         .onChange(of:room.incoming){ ids in
             for p in nearby.map(\.profile) where ids.contains(p.id) && likes.contains(p.id) {remember(p)}
         }
@@ -126,47 +134,254 @@ struct OpenDateView: View {
         .sheet(isPresented:$editing){editor}
         .sheet(item:$selected){p in signal(p)}
         .sheet(item:$detail){p in
+            if score(p) >= 3 {
+                chemistryDetail(p)
+            } else {
             VStack(alignment:.leading,spacing:20){
                 ProfilePortrait(person: p, size: 68)
                 Text(p.name).font(.system(size:38,design:.serif))
                 Text(p.lookingFor).font(.title3)
+                profileFacts(p)
                 Text(p.interests.joined(separator:"  ·  "));if let personality=p.personality,!personality.isEmpty{Text(personality)}
                 if demo {Text("Fictional demo profile · likes you back").font(.caption).foregroundStyle(.secondary)}
                 if saved.contains(where:{$0.id==p.id}) {Button("View match"){detail=nil;tab=2}}
                 else {Button(likes.contains(p.id) ? "Send interest again" : "Like "+p.name){like(p)}.buttonStyle(.borderedProminent)}
                 Button("Pass"){skip(p);detail=nil}
             }.padding(28).frame(maxWidth:.infinity,alignment:.leading).presentationDetents([.medium,.large]).tint(rose)
+            }
         }
     }
-    private var matches:some View {
-        NavigationStack {List {
-            if saved.isEmpty {Text("Like someone in Discover. When you both like each other, you’ll see your match here.")}
-            if demo {Text("Demo matches · fictional people").font(.caption).foregroundStyle(.secondary)}
-            ForEach(saved){p in VStack(alignment:.leading,spacing:8){
-                Text(p.name).font(.title2.bold());Text(p.lookingFor);Text(p.interests.joined(separator:" · ")).foregroundStyle(.secondary)
-                if open && nearby.contains(where:{$0.id==p.id}) {Button("Find each other offline"){find(p)}}
-                else {Text("Outside the current room").font(.caption)}
-            }.padding(.vertical,6)}.onDelete{offsets in if demo {demoSaved.remove(atOffsets:offsets);return};liveSaved.remove(atOffsets:offsets);UserDefaults.standard.set(try? JSONEncoder().encode(liveSaved),forKey:"openDate.matches")}
-        }.navigationTitle("Matches")}
+    private func chemistryDetail(_ p: DateProfile) -> some View {
+        let shared = common(p)
+        let sameGoal = profile.lookingFor == p.lookingFor
+        let total = max(1, max(profile.interests.count, p.interests.count))
+        let interestRatio = Double(shared.count) / Double(total)
+        // Preview index for recommended profiles, derived only from declared preferences.
+        let chemistry = Int((52 + 30 * interestRatio + (sameGoal ? 18 : 0)).rounded())
+        let alreadyMatched = saved.contains { $0.id == p.id }
+        let pink = Color(red: 1, green: 0.58, blue: 0.81)
+        let surface = Color(red: 0.19, green: 0.14, blue: 0.23)
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    Text("Second You found someone").font(.subheadline)
+                    Spacer()
+                    Button { detail = nil } label: { Image(systemName: "xmark.circle.fill").font(.title2) }
+                        .accessibilityLabel("Close profile")
+                }
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("\(chemistry)% chemistry").font(.system(size: 38, weight: .semibold, design: .serif))
+                    HStack(spacing: 14) {
+                        MyAvatar().scaleEffect(1.9).frame(width: 78, height: 78)
+                            .overlay(Circle().strokeBorder(pink, lineWidth: 2))
+                        ProfilePortrait(person: p, size: 78)
+                            .overlay(Circle().strokeBorder(pink, lineWidth: 2))
+                    }.frame(maxWidth: .infinity)
+                    Text(p.name).font(.title2.bold())
+                    profileFacts(p)
+                    Text(p.interests.joined(separator: " · ")).font(.subheadline)
+                    Button {
+                        if alreadyMatched { detail = nil; tab = 2 } else { like(p); if demo { tab = 2 } }
+                    } label: {
+                        Text(alreadyMatched ? "View match" : "Say hi").fontWeight(.semibold)
+                            .frame(maxWidth: .infinity).padding(.vertical, 13)
+                    }.background(pink, in: RoundedRectangle(cornerRadius: 14)).foregroundStyle(.black)
+                }.padding(20).background(surface, in: RoundedRectangle(cornerRadius: 22))
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Why you are matched").font(.headline)
+                    Divider().overlay(.white.opacity(0.2))
+                    Text("Shared interests").font(.subheadline.bold())
+                    Text(shared.joined(separator: " · "))
+                    Divider().overlay(.white.opacity(0.2))
+                    Text("Dating preferences").font(.subheadline.bold())
+                    Text(sameGoal ? "You’re both looking for: " + p.lookingFor : p.name + " is looking for: " + p.lookingFor)
+                    Text("Chemistry is a preview score based on your listed interests and dating preferences.").font(.footnote).foregroundStyle(.white.opacity(0.7))
+                }.padding(20).frame(maxWidth: .infinity, alignment: .leading).background(surface, in: RoundedRectangle(cornerRadius: 22))
+            }.padding(20)
+        }.background(Color(red: 0.095, green: 0.065, blue: 0.12)).foregroundStyle(.white)
+            .presentationDetents([.large]).presentationDragIndicator(.visible)
     }
-    private func journal(afterMeeting:Bool)->some View {
-        let input = demo ? (afterMeeting ? $demoMeetingNote : $demoSelfNote) : (afterMeeting ? $encounterNote : $selfNote)
-        let reflection = demo ? (afterMeeting ? $demoMeetingReflection : $demoPortrait) : (afterMeeting ? $encounterReflection : $selfReflection)
-        return NavigationStack {Form {
-            if demo {Section {Label(afterMeeting ? "Demo · After meeting Remy" : "Demo · Sam’s portrait", systemImage:afterMeeting ? "text.bubble" : "person.crop.circle").font(.headline)}}
-            if !afterMeeting {Section("Dating profile"){Button("Edit interests and preferences"){editing=true};Text(profile.lookingFor)}}
-            Section(afterMeeting ? "After meeting someone" : "In your own words"){
-                Text(afterMeeting ? "Write or dictate what you noticed and how you felt." : "Write or dictate what you enjoy, what you value, and who you hope to meet.").font(.subheadline)
-                TextEditor(text:input).frame(minHeight:100)
-                Button(working ? "Working…" : afterMeeting ? "Reflect on this meeting" : "Build my portrait"){
-                    working=true
-                    Task {let result=await PersonalInsights.reflect(text:input.wrappedValue,profile:profile,afterMeeting:afterMeeting)
-                        reflection.wrappedValue=result;working=false}
-                }.disabled(working || input.wrappedValue.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty)
+    @State private var exchanges: [UUID: AgentExchange] = [:]
+    @State private var partial: [UUID: [String]] = [:]
+
+    private func prepareExchanges() async {
+        for person in saved {
+            guard !Task.isCancelled else { return }
+            guard !demo, exchanges[person.id] == nil else { continue }
+            let key = "openDate.agentExchange." + person.id.uuidString
+            if !demo, let data = UserDefaults.standard.data(forKey: key),
+               let cached = try? JSONDecoder().decode(AgentExchange.self, from: data) {
+                exchanges[person.id] = cached
+                continue
             }
-            let result=reflection.wrappedValue
-            if !result.isEmpty {Section("Private reflection"){Text(result).textSelection(.enabled)}}
-        }.navigationTitle(afterMeeting ? "Analyze" : "Second You")
+            let transcript = await AgentExchange.generate(profile, person) { lines in partial[person.id] = lines }
+            guard !Task.isCancelled else { return }
+            exchanges[person.id] = transcript
+            partial[person.id] = nil
+            if !demo { UserDefaults.standard.set(try? JSONEncoder().encode(transcript), forKey: key) }
+        }
+    }
+
+    @State private var chatMatch: DateProfile?
+    @State private var planningMatch: DateProfile?
+
+    private var settings: some View {
+        NavigationStack {
+            List {
+                Button("Edit profile") { editing = true }
+                Button("Location and notification permissions") {
+                    if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+                }
+            }.navigationTitle("Settings")
+        }
+    }
+    @State private var reviewingMatch: DateProfile?
+    @State private var pastDates: [ReviewDate] = []
+    private func refreshDates() { pastDates = DateHistory.load(people: saved, demo: demo) }
+
+    private var matches: some View {
+        NavigationStack {
+            List {
+                if saved.isEmpty { Text("When you both like each other, your agents can start a conversation here.") }
+                ForEach(saved) { person in
+                    VStack(alignment: .leading, spacing: 10) {
+                        Button { chatMatch = person } label: {
+                            HStack(spacing: 12) {
+                                ProfilePortrait(person: person, size: 52)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(person.name).font(.headline)
+                                    Text(person.interests.joined(separator: " · "))
+                                        .font(.subheadline).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                            }.contentShape(Rectangle())
+                        }.buttonStyle(.plain)
+                        HStack(spacing: 10) {
+                            Button { chatMatch = person } label: { Label("Chat", systemImage: "bubble.left.and.bubble.right") }
+                            Button { find(person) } label: { Label("Find", systemImage: "location") }
+                            Spacer(minLength: 0)
+                            let hasHistory = pastDates.contains { $0.person.id == person.id }
+                            Button(hasHistory ? "Analyze date" : "Arrange date") {
+                                if hasHistory { reviewingMatch = person } else { planningMatch = person }
+                            }
+                                .buttonStyle(.borderedProminent)
+                        }.font(.subheadline.weight(.medium)).buttonStyle(.borderless)
+                            .controlSize(.regular)
+                    }.padding(.vertical, 6)
+                }.onDelete { offsets in
+                    for index in offsets {
+                        let id = saved[index].id
+                        exchanges[id] = nil
+                        partial[id] = nil
+                        if !demo { UserDefaults.standard.removeObject(forKey: "openDate.agentExchange." + id.uuidString) }
+                    }
+                    if demo { demoSaved.remove(atOffsets: offsets) }
+                    else {
+                        liveSaved.remove(atOffsets: offsets)
+                        UserDefaults.standard.set(try? JSONEncoder().encode(liveSaved), forKey: "openDate.matches")
+                    }
+                }
+            }.navigationTitle("Matches")
+                .onAppear(perform: refreshDates)
+                .onChange(of: saved) { refreshDates() }
+                .sheet(item: $reviewingMatch) { person in
+                    NavigationStack {
+                        let dates = pastDates.filter { $0.person.id == person.id }
+                        Group {
+                            if dates.count == 1, let date = dates.first { DateDebrief(date: date, demo: demo) }
+                            else { DateHistory(dates: dates, demo: demo) }
+                        }.toolbar { Button("Done") { reviewingMatch = nil } }
+                    }
+                }
+                .sheet(item: $chatMatch) { person in
+                    NavigationStack {
+                        agentConversation(person)
+                            .toolbar { Button("Done") { chatMatch = nil } }
+                    }
+                }
+                .sheet(item: $planningMatch, onDismiss: refreshDates) { person in MatchDatePlanner(person: person, demo: demo) }
+        }
+    }
+
+    private func agentConversation(_ person: DateProfile) -> some View {
+        let exchange = demo ? AgentExchange.suggested(profile, person) : exchanges[person.id]
+        let lines = exchange?.lines ?? partial[person.id] ?? []
+        let pink = Color(red: 1, green: 0.64, blue: 0.83)
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    ProfilePortrait(person: person, size: 48)
+                    VStack(alignment: .leading) {
+                        Text("Match with " + person.name).font(.title2.bold())
+                        Text(exchange == nil ? "Your agents are talking…" : exchange?.onDevice == true ? "On-device agent conversation" : "Profile-based demo conversation").font(.caption)
+                    }
+                }
+                ForEach(AgentExchange.topics.indices, id: \.self) { topic in
+                    if lines.count > topic * 2 {
+                        Text(AgentExchange.topics[topic]).font(.caption.bold()).foregroundStyle(pink).padding(.top, 6)
+                        ForEach(topic * 2..<min(lines.count, topic * 2 + 2), id: \.self) { i in
+                            let mine = i.isMultiple(of: 2)
+                            HStack {
+                                if mine { Spacer(minLength: 28) }
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text((mine ? profile.name : person.name) + "’s agent").font(.caption.bold()).foregroundStyle(pink)
+                                    Text(lines[i]).font(.subheadline)
+                                }.padding(12).background(mine ? Color(red: 0.32, green: 0.18, blue: 0.31) : Color(red: 0.20, green: 0.16, blue: 0.24), in: RoundedRectangle(cornerRadius: 16))
+                                if !mine { Spacer(minLength: 28) }
+                            }
+                        }
+                    }
+                }
+                if exchange == nil { ProgressView().tint(pink) }
+
+            }.padding(18).frame(maxWidth: .infinity, alignment: .leading)
+        }.background(Color(red: 0.095, green: 0.065, blue: 0.12)).foregroundStyle(.white)
+            .navigationBarTitleDisplayMode(.inline)
+    }
+    private var secondYou: some View {
+        let input = demo ? $demoSelfNote : $selfNote
+        let portrait = demo ? $demoPortrait : $selfReflection
+        let partner = demo ? $demoIdealPartner : $idealPartner
+        let ideal = demo ? $demoIdealDate : $idealDate
+        return NavigationStack {
+            Form {
+                Section {
+                    HStack(spacing: 12) {
+                        MyAvatar()
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(profile.name).font(.headline)
+                            if let bio = profile.personality, !bio.isEmpty { Text(bio).font(.subheadline) }
+                        }
+                    }
+                    if let job = profile.occupation, !job.isEmpty { LabeledContent("Work", value: job) }
+                    if let school = profile.education, !school.isEmpty { LabeledContent("Education", value: school) }
+                    LabeledContent("Interests", value: profile.interests.joined(separator: " · "))
+                    DisclosureGroup("In my own words") {
+                        TextField("What do you enjoy or value?", text: input, axis: .vertical)
+                        Button(working ? "Building portrait…" : "Build my portrait") {
+                            working = true
+                            Task {
+                                portrait.wrappedValue = await PersonalInsights.reflect(text: input.wrappedValue, profile: profile, afterMeeting: false)
+                                working = false
+                            }
+                        }.disabled(working || input.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        if !portrait.wrappedValue.isEmpty { Text(portrait.wrappedValue).font(.subheadline) }
+                    }
+                } header: { Text("About Me").font(.title2.bold()).textCase(nil).foregroundStyle(plum) }
+                Section {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Who I’d like to meet").font(.subheadline.bold())
+                        TextField("What qualities matter to you in a partner?", text: partner, axis: .vertical)
+                    }.padding(.vertical, 4)
+                    LabeledContent("Looking for", value: profile.lookingFor)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("My kind of first date").font(.subheadline.bold())
+                        TextField("Where would you go, and what would you do together?", text: ideal, axis: .vertical)
+                            .font(.body)
+                    }.padding(.vertical, 4)
+                } header: { Text("My Ideal Date").font(.title2.bold()).textCase(nil).foregroundStyle(plum) }
+            }.navigationTitle("Second You")
+                .toolbar { Button("Edit profile") { editing = true } }
         }
     }
     private var discovery: some View {
@@ -185,7 +400,7 @@ struct OpenDateView: View {
                             Button(open ? "Leave" : "Enter") { if open { leave() } else { open = true } }
                         }
                         if open {
-                            DeviceMap(people: nearby.map(\.profile)) { members in
+                            DeviceMap(people: nearby.map(\.profile), compatible: Set(recommendations.map(\.id))) { members in
                                 directory = PeopleDirectory(title: "Here on the map", people: members)
                             }
                         }
@@ -207,12 +422,50 @@ struct OpenDateView: View {
                 }.foregroundStyle(.white).padding(24).frame(maxWidth:.infinity,alignment:.leading).background(plum,in:RoundedRectangle(cornerRadius:26))
                 }
                 if open {
-                    Toggle("Instant matching",isOn:$instant).font(.headline).tint(rose)
-                        .onChange(of:instant){ enabled in if enabled { UNUserNotificationCenter.current().requestAuthorization(options:[.alert,.sound]){ _,_ in }; match() } else {banner=nil} }
-                    if let p=banner {
-                        VStack(alignment:.leading,spacing:9){Label("Instant match",systemImage:"sparkles").font(.caption.bold());Text("\(p.name) is nearby").font(.title3.bold())
-                            HStack {Button("View profile"){banner=nil;detail=p}.buttonStyle(.borderedProminent);Button("Pass"){skip(p)}}
-                        }.padding().frame(maxWidth:.infinity,alignment:.leading).background(Color.pink.opacity(0.09),in:RoundedRectangle(cornerRadius:18))
+                    Toggle("Instant matching", isOn: $instant)
+                        .font(.headline).tint(rose)
+                        .onChange(of: instant) { _, enabled in
+                            banner = nil
+                            analyzing = false
+                            finishedScan = false
+                            if enabled { alerted.removeAll() }
+                        }
+                    if instant {
+                        if let person = banner {
+                            VStack(alignment: .leading, spacing: 12) {
+                                Text("Suggested for you").font(.caption.bold()).foregroundStyle(rose)
+                                HStack {
+                                    ProfilePortrait(person: person, size: 58)
+                                    Text(person.name).font(.title2.bold())
+                                }
+                                profileFacts(person)
+                                Text(person.interests.joined(separator: " · ")).font(.subheadline)
+                                HStack {
+                                    Button("View profile") { detail = person }.buttonStyle(.borderedProminent)
+                                    Button("Pass") { finishedScan = false; analyzing = false; skip(person) }
+                                }
+                            }.padding().frame(maxWidth: .infinity, alignment: .leading)
+                                .background(.white, in: RoundedRectangle(cornerRadius: 18))
+                        } else {
+                            Group {
+                                if finishedScan {
+                                    Text("No suggested profiles nearby yet.")
+                                } else {
+                                    MatchActivity(analyzing: analyzing)
+                                }
+                            }
+                                .task(id: candidate?.id) {
+                                    analyzing = false
+                                    finishedScan = false
+                                    do {
+                                        try await Task.sleep(for: .seconds(2))
+                                        analyzing = true
+                                        try await Task.sleep(for: .seconds(2))
+                                        match()
+                                        finishedScan = true
+                                    } catch { return }
+                                }
+                        }
                     }
                     directoryButton("Open to date", people: nearby.map(\.profile))
                     if nearby.isEmpty {
@@ -231,7 +484,6 @@ struct OpenDateView: View {
                             }.padding(.vertical, 2)
                         }.scrollIndicators(.hidden)
                     }
-                    let recommendations = nearby.filter { score($0.profile) >= 3 }
                     directoryButton("High compatibility", people: recommendations.map(\.profile))
                     if recommendations.isEmpty {
                         Text("No close preference matches here yet.").foregroundStyle(.secondary)
@@ -256,7 +508,7 @@ struct OpenDateView: View {
         .onChange(of: nearby.map(\.id)) { _, ids in
             if let current = banner, !ids.contains(current.id) { banner = nil }
         }
-        .onChange(of:candidate?.id){_ in match()}
+
 
 
     }
@@ -276,6 +528,10 @@ struct OpenDateView: View {
             }
         }.buttonStyle(.plain)
     }
+    @ViewBuilder private func profileFacts(_ person: DateProfile) -> some View {
+        if let work = person.occupation, !work.isEmpty { Label(work, systemImage: "briefcase") }
+        if let school = person.education, !school.isEmpty { Label(school, systemImage: "graduationcap") }
+    }
     private var editor: some View {
         NavigationStack {Form {
             Section {
@@ -290,6 +546,8 @@ struct OpenDateView: View {
                 }
             }
             Section("Your room profile"){ TextField("First name",text:profileBinding.name)
+                TextField("Work", text: Binding(get: { profile.occupation ?? "" }, set: { profileBinding.wrappedValue.occupation = String($0.prefix(80)) }))
+                TextField("Education", text: Binding(get: { profile.education ?? "" }, set: { profileBinding.wrappedValue.education = String($0.prefix(80)) }))
                 TextField("How you describe yourself", text: Binding(get:{profile.personality ?? ""},set:{profileBinding.wrappedValue.personality=String($0.prefix(160))}))
                 Picker("Looking for",selection:profileBinding.lookingFor){ForEach(["Someone to explore with","An adventure buddy","A creative collaborator"],id:\.self){Text($0)}}
             }
@@ -394,6 +652,66 @@ private struct IndoorPlan: View {
             }.frame(height: 340)
         }.foregroundStyle(ink).background(.white, in: RoundedRectangle(cornerRadius: 20))
             .clipShape(RoundedRectangle(cornerRadius: 20))
+    }
+}
+
+private struct MatchActivity: View {
+    let analyzing: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var started = Date()
+    private let accent = Color(red: 0.61, green: 0.16, blue: 0.31)
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: reduceMotion)) { frame in
+            let elapsed = max(0, frame.date.timeIntervalSince(started))
+            let secondSignal = reduceMotion || elapsed > 0.8
+            HStack(spacing: 14) {
+                if analyzing {
+                    VStack(spacing: 8) {
+                        signal("sparkles", active: true)
+                        signal("heart.fill", active: secondSignal)
+                    }.frame(width: 68)
+                } else {
+                    ZStack {
+                        ForEach(0..<2) { ring in
+                            let phase = reduceMotion ? Double(ring + 1) / 2 : (elapsed / 1.5 + Double(ring) / 2).truncatingRemainder(dividingBy: 1)
+                            Circle().stroke(accent.opacity(0.65 - phase * 0.45), lineWidth: 1.5)
+                                .frame(width: 29 + phase * 39, height: 29 + phase * 39)
+                        }
+                        MyAvatar().scaleEffect(0.68)
+                        ForEach(0..<3) { index in
+                            Circle().fill(accent).frame(width: 5, height: 5)
+                                .offset(x: [-22, 19, 16][index], y: [-10, -17, 21][index])
+                                .opacity(reduceMotion || elapsed > Double(index) * 0.38 ? 1 : 0)
+                        }
+                    }.frame(width: 68, height: 68)
+                }
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(analyzing ? "Comparing profiles" : "Detecting nearby")
+                        .font(.headline)
+                    if analyzing {
+                        Text("Shared interests").foregroundStyle(accent)
+                        Text("Dating preferences").foregroundStyle(secondSignal ? accent : .secondary)
+                    } else {
+                        Text("Finding people open to date…").foregroundStyle(.secondary)
+                    }
+                }.font(.subheadline)
+                Spacer(minLength: 0)
+            }
+        }
+        .onChange(of: analyzing) { _, _ in started = Date() }
+        .padding(14).frame(maxWidth: .infinity, minHeight: 98, alignment: .leading)
+        .background(Color(red: 1, green: 0.96, blue: 0.96), in: RoundedRectangle(cornerRadius: 18))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(analyzing ? "Comparing shared interests and dating preferences" : "Detecting people nearby")
+    }
+
+    private func signal(_ icon: String, active: Bool) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon).frame(width: 18)
+            Capsule().frame(width: 22, height: 2)
+            Circle().frame(width: 7, height: 7)
+        }.font(.caption).foregroundStyle(active ? accent : Color.gray.opacity(0.35))
     }
 }
 
@@ -507,13 +825,16 @@ private enum DemoCrowd {
         let id = UUID(uuidString: String(format: "10000000-0000-4000-A000-%012d", i))!
         return DateProfile(id: id, name: names[i % names.count] + " " + suffix,
                            interests: [interests[first], interests[second]],
-                           lookingFor: goals[(i + i / interests.count) % goals.count], symbol: "sparkles")
+                           lookingFor: goals[(i + i / interests.count) % goals.count],
+                           occupation: ["Product designer", "Software engineer", "Illustrator", "Event producer", "Researcher", "Architect"][i % 6],
+                           education: ["BFA in Design", "BS in Computer Science", "BA in Fine Arts", "BA in Communications", "MSc in Biology", "Master of Architecture"][i % 6], symbol: "sparkles")
     }
     static let indices = Dictionary(uniqueKeysWithValues: people.enumerated().map { ($0.element.id, $0.offset) })
 }
 
 private struct DeviceMap: View {
     let people: [DateProfile]
+    let compatible: Set<UUID>
     let showGroup: ([DateProfile]) -> Void
     @StateObject private var position = DevicePosition()
     @State private var anchor: CLLocationCoordinate2D?
@@ -527,18 +848,29 @@ private struct DeviceMap: View {
                     if let anchor {
                         ForEach(0..<6, id: \.self) { index in
                             let members = people.filter { (DemoCrowd.indices[$0.id] ?? 0) % 6 == index }
-                            if let first = members.first {
+                            if let first = members.first(where: { compatible.contains($0.id) }) ?? members.first {
                                 let angle = Double(index) * .pi / 3
                                 let spot = CLLocationCoordinate2D(latitude: anchor.latitude + 16 * cos(angle) / 111_000,
                                                                   longitude: anchor.longitude + 17 * sin(angle) / (111_000 * max(0.01, cos(anchor.latitude * .pi / 180))))
                                 Annotation("", coordinate: spot) {
                                     Button { showGroup(members) } label: {
                                         ProfilePortrait(person: first, size: 38)
+                                            .overlay(alignment: .topTrailing) {
+                                                if compatible.contains(first.id) {
+                                                    Image(systemName: "heart.fill")
+                                                        .font(.system(size: 11, weight: .bold))
+                                                        .foregroundStyle(.pink)
+                                                        .frame(width: 17, height: 17)
+                                                        .background(.white, in: Circle())
+                                                        .offset(x: 3, y: -2)
+                                                        .accessibilityHidden(true)
+                                                }
+                                            }
                                             .overlay(alignment: .bottomTrailing) {
                                                 Text("\(members.count)").font(.caption2.bold()).padding(3)
                                                     .foregroundStyle(.white).background(.black, in: Capsule()).offset(x: 6, y: 3)
                                             }
-                                    }.accessibilityLabel("\(members.count) people here")
+                                    }.accessibilityLabel("\(first.name), \(compatible.contains(first.id) ? "high compatibility, " : "")\(members.count) people here")
                                 }
                             }
                         }
@@ -554,5 +886,232 @@ private struct DeviceMap: View {
                 if anchor == nil { anchor = fix.coordinate }
                 camera = .region(MKCoordinateRegion(center: fix.coordinate, latitudinalMeters: 56, longitudinalMeters: 56))
             }
+    }
+}
+
+private struct MatchDatePlanner: View {
+    let person: DateProfile
+    let demo: Bool
+    @Environment(\.dismiss) private var dismiss
+    @State private var time: Date?
+    @State private var place = ""
+    @State private var confirmed = false
+    private let pink = Color(red: 1, green: 0.65, blue: 0.84)
+    var followUpID: String? = nil
+    private var key: String { "openDate.datePlan." + person.id.uuidString + (followUpID.map { "." + $0 } ?? "") }
+
+    private func prepare() async {
+        let defaults = UserDefaults.standard
+        if let saved = defaults.dictionary(forKey: key),
+           let date = saved["time"] as? Date, let venue = saved["place"] as? String {
+            time = date
+            place = venue
+            confirmed = saved["confirmed"] as? Bool ?? false
+            return
+        }
+        let calendar = Calendar.current
+        let now = Date()
+        let reserved = defaults.dictionaryRepresentation().compactMap { entry -> Date? in
+            guard entry.key.hasPrefix("openDate.datePlan.") else { return nil }
+            return (entry.value as? [String: Any])?["time"] as? Date
+        }
+        // Prefer the first evening slot with enough notice and no overlap with a local date plan.
+        let slots = (0...(reserved.count + 1)).flatMap { offset -> [Date] in
+            guard let day = calendar.date(byAdding: .day, value: offset, to: now) else { return [] }
+            return [18, 19, 20].compactMap { calendar.date(bySettingHour: $0, minute: 0, second: 0, of: day) }
+        }
+        let candidate = slots.first { slot in
+            slot.timeIntervalSince(now) >= 7200 && reserved.allSatisfy { abs($0.timeIntervalSince(slot)) >= 7200 }
+        }
+        do { try await Task.sleep(for: .seconds(2.4)) } catch { return }
+        guard let candidate else { return }
+        place = demo ? "Ruby Wine, Potrero Hill" : "Choose a meeting place together"
+        time = candidate
+        defaults.set(["place": place, "time": candidate, "confirmed": false], forKey: key)
+    }
+
+    var body: some View {
+        ZStack {
+            LinearGradient(colors: [Color(red: 0.10, green: 0.07, blue: 0.17), Color(red: 0.19, green: 0.11, blue: 0.25)], startPoint: .topLeading, endPoint: .bottomTrailing).ignoresSafeArea()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    HStack {
+                        ProfilePortrait(person: person, size: 40)
+                        Text("Date with " + person.name).font(.headline)
+                        Spacer()
+                        Button("Done") { dismiss() }.foregroundStyle(pink)
+                    }
+                    VStack(alignment: .leading, spacing: 16) {
+                        if let time {
+                            Text(confirmed ? "Date set" : followUpID == nil ? "First date" : "Next date").font(.subheadline.bold()).foregroundStyle(pink)
+                            Text(time.formatted(.dateTime.weekday(.wide)) + " · " + time.formatted(date: .omitted, time: .shortened))
+                                .font(.system(.largeTitle, design: .serif).bold())
+                            Text(time.formatted(date: .long, time: .omitted)).font(.subheadline)
+                            Divider()
+                            LabeledContent(place, value: "For two")
+                            Divider()
+                            LabeledContent("Suggested departure", value: time.addingTimeInterval(-1200).formatted(date: .omitted, time: .shortened))
+                            Divider()
+                            LabeledContent(person.name, value: demo ? "Demo match" : "Awaiting confirmation")
+                            Button {
+                                confirmed = true
+                                UserDefaults.standard.set(["place": place, "time": time, "confirmed": true], forKey: key)
+                            } label: {
+                                Text(confirmed ? "Confirmed by you" : "Confirm").fontWeight(.semibold).frame(maxWidth: .infinity).padding(12)
+                            }.background(pink, in: RoundedRectangle(cornerRadius: 12)).foregroundStyle(.black).disabled(confirmed)
+                        } else {
+                            ProgressView().tint(pink)
+                            Text("Finding a time for two…").font(.system(.title, design: .serif).bold())
+                            Text("Your agent is checking evening slots against your saved date plans.")
+                        }
+                    }.padding(20).frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 22))
+                    Text(demo ? "Demo itinerary · No bookings or invitations." : "Saved on this device. Confirm with your match before booking.").font(.footnote).foregroundStyle(.white.opacity(0.72))
+                }.padding(20)
+            }
+        }.foregroundStyle(.white).task { await prepare() }
+            .presentationDetents([.large]).presentationDragIndicator(.visible)
+    }
+}
+
+private struct ReviewDate: Identifiable {
+    let id: String
+    let person: DateProfile
+    let time: Date
+    let place: String
+}
+
+private struct DateHistory: View {
+    let dates: [ReviewDate]
+    let demo: Bool
+
+    static func load(people: [DateProfile], demo: Bool) -> [ReviewDate] {
+        var history: [ReviewDate] = []
+        for person in people {
+            let prefix = "openDate.datePlan." + person.id.uuidString
+            for (key, value) in UserDefaults.standard.dictionaryRepresentation() where key == prefix || key.hasPrefix(prefix + ".") {
+                guard let plan = value as? [String: Any], plan["confirmed"] as? Bool == true,
+                      let time = plan["time"] as? Date, time <= Date(), let place = plan["place"] as? String else { continue }
+                history.append(ReviewDate(id: key, person: person, time: time, place: place))
+            }
+        }
+        if demo, people.contains(where: { $0.id == DemoCrowd.people[3].id }) {
+            let key = "openDate.sampleEncounterDate"
+            let time = UserDefaults.standard.object(forKey: key) as? Date ?? Date().addingTimeInterval(-86400)
+            UserDefaults.standard.set(time, forKey: key)
+            history.append(ReviewDate(id: "sample-alex", person: DemoCrowd.people[3], time: time, place: "Record fair · Demo date"))
+        }
+        return history.sorted { $0.time > $1.time }
+    }
+
+    var body: some View {
+            List {
+                if dates.isEmpty { Text("After a confirmed date has passed, you can reflect on it here.") }
+                ForEach(dates) { date in
+                    NavigationLink {
+                        DateDebrief(date: date, demo: demo)
+                    } label: {
+                        HStack(spacing: 12) {
+                            ProfilePortrait(person: date.person, size: 50)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(date.person.name).font(.headline)
+                                Text(date.place)
+                                Text(date.time.formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+            }.navigationTitle("Past dates")
+    }
+}
+
+private struct DateDebrief: View {
+    struct Reflection: Codable {
+        var turns: [ReviewTurn] = []
+        var idea: String?
+        var rating = 0
+        var interest = "Unsure"
+        var verdict: DateVerdict?
+    }
+    let date: ReviewDate
+    let demo: Bool
+    @State private var review: Reflection
+    @State private var busy = false
+    @State private var planning = false
+    @FocusState private var typing: Bool
+    private var key: String { "openDate.review." + date.id }
+    init(date: ReviewDate, demo: Bool) {
+        self.date = date
+        self.demo = demo
+        let data = UserDefaults.standard.data(forKey: "openDate.review." + date.id)
+        var stored = data.flatMap { try? JSONDecoder().decode(Reflection.self, from: $0) } ?? Reflection()
+        if stored.idea == nil { stored.idea = stored.turns.map(\.note).joined(separator: "\n\n") }
+        _review = State(initialValue: stored)
+    }
+    private func save() { UserDefaults.standard.set(try? JSONEncoder().encode(review), forKey: key) }
+    private let pink = Color(red: 1, green: 0.66, blue: 0.84)
+    var body: some View {
+        ScrollViewReader { reader in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    HStack {
+                        ProfilePortrait(person: date.person, size: 42)
+                        VStack(alignment: .leading) {
+                            Text(date.person.name).font(.headline)
+                            Text(date.place).font(.subheadline).foregroundStyle(.white.opacity(0.75))
+                        }
+                    }
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Share your idea").font(.headline)
+                        TextField("", text: Binding(get: { review.idea ?? "" }, set: {
+                            review.idea = $0; review.verdict = nil; save()
+                        }), prompt: Text("How did the date feel?").foregroundColor(.white.opacity(0.6)), axis: .vertical)
+                            .lineLimit(3...6).focused($typing).accessibilityLabel("Share your idea")
+                    }.padding(18).frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 18))
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Rate your date").font(.headline)
+                        LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 5)) {
+                            ForEach(1...10, id: \.self) { n in
+                                Button {
+                                    review.rating = n; review.verdict = nil; typing = false; save()
+                                } label: {
+                                    Text(String(n)).fontWeight(.semibold).frame(maxWidth: .infinity, minHeight: 44)
+                                        .foregroundStyle(n == review.rating ? Color.black : .white)
+                                        .background(n == review.rating ? pink : .white.opacity(0.1), in: Capsule())
+                                }.accessibilityLabel("\(n) out of 10").accessibilityAddTraits(n == review.rating ? .isSelected : [])
+                            }
+                        }
+                    }.padding(18).background(.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 18))
+                    Button {
+                        typing = false
+                        busy = true
+                        Task {
+                            review.verdict = await DateCoach.verdict([review.idea ?? ""], rating: review.rating)
+                            save(); busy = false
+                            withAnimation { reader.scrollTo("summary", anchor: .center) }
+                        }
+                    } label: {
+                        Text(busy ? "Summarizing…" : "Summarize Date").fontWeight(.semibold)
+                            .frame(maxWidth: .infinity, minHeight: 48).foregroundStyle(.black)
+                            .background(pink, in: RoundedRectangle(cornerRadius: 14))
+                    }.disabled(review.rating == 0 || busy).opacity(review.rating == 0 ? 0.5 : 1)
+                    if let result = review.verdict {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Date summary").font(.headline)
+                            LabeledContent("Your rating", value: "\(review.rating) / 10")
+                            LabeledContent(result.model ? "Your agent" : "Guided estimate", value: result.score.formatted(.number.precision(.fractionLength(1))) + " / 10")
+                            Text(result.summary)
+                            Divider()
+                            Text(result.next)
+                            if review.rating >= 6 { Button("Plan it") { planning = true }.foregroundStyle(pink) }
+                        }.padding(18).background(.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 18)).id("summary")
+                    }
+                }.padding(20).disabled(busy)
+            }.scrollDismissesKeyboard(.interactively)
+        }.background(LinearGradient(colors:[Color(red:0.10,green:0.07,blue:0.17),Color(red:0.19,green:0.11,blue:0.25)], startPoint:.topLeading,endPoint:.bottomTrailing).ignoresSafeArea())
+            .foregroundStyle(.white).navigationTitle("Analyze Date").navigationBarTitleDisplayMode(.inline)
+            .toolbarColorScheme(.dark, for:.navigationBar)
+            .sheet(isPresented:$planning) { MatchDatePlanner(person:date.person, demo:demo, followUpID: String(Int(date.time.timeIntervalSince1970))) }
     }
 }

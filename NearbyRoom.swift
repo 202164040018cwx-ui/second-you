@@ -7,15 +7,17 @@ struct DateProfile: Codable, Identifiable, Equatable {
     var name: String
     var interests: [String]
     var lookingFor: String
+    var occupation: String?
+    var education: String?
     var personality: String?
     var floorCode: String?
     var symbol: String
     static let cues = ["sparkles", "moon.stars.fill", "sun.max.fill", "leaf.fill"]
     static let choices = ["Design", "Music", "Outdoors", "Food", "Film", "Making things"]
     static let examples = [
-        DateProfile(id: UUID(uuidString:"00000000-0000-4000-A000-000000000001")!, name: "Ari", interests: ["Design", "Music"], lookingFor: "A creative collaborator", personality: "I design gig posters and keep a running list of tiny music venues. Ask me about the show I went to last Friday.", symbol: "sparkles"),
-        DateProfile(id: UUID(uuidString:"00000000-0000-4000-A000-000000000002")!, name: "Jules", interests: ["Outdoors", "Food"], lookingFor: "An adventure buddy", personality: "My ideal Saturday starts on a coastal trail and ends at a noodle shop neither of us has tried.", symbol: "leaf.fill"),
-        DateProfile(id: UUID(uuidString:"00000000-0000-4000-A000-000000000003")!, name: "Remy", interests: ["Music", "Film"], lookingFor: "Someone to explore with", personality: "I make short films and collect records. Always looking for someone to catch a matinee with.", symbol: "moon.stars.fill")
+        DateProfile(id: UUID(uuidString:"00000000-0000-4000-A000-000000000001")!, name: "Ari", interests: ["Design", "Music"], lookingFor: "A creative collaborator", occupation: "Graphic designer", education: "BFA in Graphic Design", personality: "I design gig posters and keep a running list of tiny music venues. Ask me about the show I went to last Friday.", symbol: "sparkles"),
+        DateProfile(id: UUID(uuidString:"00000000-0000-4000-A000-000000000002")!, name: "Jules", interests: ["Outdoors", "Food"], lookingFor: "An adventure buddy", occupation: "Trail guide", education: "BS in Environmental Science", personality: "My ideal Saturday starts on a coastal trail and ends at a noodle shop neither of us has tried.", symbol: "leaf.fill"),
+        DateProfile(id: UUID(uuidString:"00000000-0000-4000-A000-000000000003")!, name: "Remy", interests: ["Music", "Film"], lookingFor: "Someone to explore with", occupation: "Film editor", education: "BA in Film Studies", personality: "I make short films and collect records. Always looking for someone to catch a matinee with.", symbol: "moon.stars.fill")
     ]
     var cue: String { Self.cues.contains(symbol) ? symbol : "sparkles" }
 }
