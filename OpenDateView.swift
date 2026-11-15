@@ -7,6 +7,8 @@ import CoreLocation
 struct OpenDateView: View {
     private let plum = Color(red:0.22, green:0.10, blue:0.17)
     private let rose = Color(red:0.64, green:0.18, blue:0.31)
+    @Environment(\.scenePhase) private var scenePhase
+    @StateObject private var vexo = VexoSignal()
     @StateObject private var room = NearbyRoom()
     @State private var roomOnly = false
     @State private var floorCode = ""
@@ -86,7 +88,7 @@ struct OpenDateView: View {
     }
     private func leave() { likes=[]; open=false; instant=false; banner=nil; selected=nil; dismissed=[]; alerted=[]; room.stop() }
     private func find(_ p:DateProfile) { banner=nil; distance=0.35; selected=p }
-    private func skip(_ p:DateProfile) { dismissed.insert(p.id); banner=nil; selected=nil }
+    private func skip(_ p:DateProfile) { vexo.send(.reject, to: p.name); dismissed.insert(p.id); banner=nil; selected=nil }
     private func remember(_ p:DateProfile) {
         guard !saved.contains(where:{$0.id==p.id}) else { return }
         if demo { demoSaved.append(p); return }
@@ -94,6 +96,7 @@ struct OpenDateView: View {
         UserDefaults.standard.set(try? JSONEncoder().encode(liveSaved),forKey:"openDate.matches")
     }
     private func like(_ p:DateProfile) {
+        vexo.send(.accept, to: p.name)
         likes.insert(p.id)
         if demo { remember(p) }
         else { room.like(p.id); if room.incoming.contains(p.id) {remember(p)} }
@@ -106,6 +109,9 @@ struct OpenDateView: View {
             matches.tabItem{Label("Matches",systemImage:"heart")}.tag(2)
             settings.tabItem{Label("Settings",systemImage:"gearshape")}.tag(3)
         }.tint(rose).preferredColorScheme(.light)
+        .task(id: scenePhase == .active ? profile.name : "") {
+            if scenePhase == .active { await vexo.connect(name: profile.name) }
+        }
         .task(id: saved.map(\.id)) { await prepareExchanges() }
         .onChange(of:room.incoming){ ids in
             for p in nearby.map(\.profile) where ids.contains(p.id) && likes.contains(p.id) {remember(p)}
@@ -228,6 +234,8 @@ struct OpenDateView: View {
     private var settings: some View {
         NavigationStack {
             List {
+                LabeledContent("Vexo Signal", value: vexo.status)
+                if let delivery = vexo.delivery { Text(delivery).font(.footnote) }
                 Button("Edit profile") { editing = true }
                 Button("Location and notification permissions") {
                     if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
