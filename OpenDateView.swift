@@ -1070,6 +1070,7 @@ private struct DateDebrief: View {
     @State private var busy = false
     @State private var planning = false
     @State private var bothAgreed = false
+    @State private var synced: Bool?
     @StateObject private var recorder = DateRecorder()
     @FocusState private var typing: Bool
     private var key: String { "openDate.review." + date.id }
@@ -1124,6 +1125,10 @@ private struct DateDebrief: View {
                             review.verdict = await DateCoach.verdict([review.idea ?? "", review.transcript.map { "What we said on the date: " + $0 } ?? ""].filter { !$0.isEmpty }, rating: review.rating)
                             save(); busy = false
                             withAnimation { reader.scrollTo("summary", anchor: .center) }
+                            if let v = review.verdict {
+                                synced = await ConvexSync.saveReview(match: date.person.name, place: date.place, rating: review.rating,
+                                    agentScore: v.score, summary: v.summary, next: v.next, recorded: review.transcript != nil)
+                            }
                         }
                     } label: {
                         Text(busy ? "Summarizing…" : "Summarize Date").fontWeight(.semibold)
@@ -1138,6 +1143,7 @@ private struct DateDebrief: View {
                             Text(result.summary)
                             Divider()
                             Text(result.next)
+                            if let synced { Label(synced ? "Saved to your Convex date history" : "Couldn't reach Convex, saved on this phone", systemImage: synced ? "checkmark.icloud" : "icloud.slash").font(.caption).foregroundStyle(.white.opacity(0.7)) }
                             if review.rating >= 6 { Button("Plan it") { planning = true }.foregroundStyle(pink) }
                         }.padding(18).background(.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 18)).id("summary")
                     }
