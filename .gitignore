@@ -2,3 +2,7 @@
 xcuserdata/
 DerivedData/
 build/
+.agents/
+.claude/
+convex-backend/login.log
+Portraits/hd_*.jpg

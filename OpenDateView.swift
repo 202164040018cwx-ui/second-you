@@ -42,7 +42,136 @@ struct OpenDateView: View {
     private var saved: [DateProfile] { demo ? demoSaved : liveSaved }
     private var profileBinding: Binding<DateProfile> { demo ? $demoProfile : $liveProfile }
     private var profile: DateProfile { profileBinding.wrappedValue }
-    @State private var tab = 0
+    @State private var tab = UserDefaults.standard.object(forKey: "uiShotTab") as? Int ?? 3
+    @State private var drag: CGSize = .zero
+    @State private var likeCount = 0
+    @State private var matchMoment: DateProfile? = UserDefaults.standard.bool(forKey: "uiShotMatch") ? DateProfile.examples[2] : nil
+    init() {
+        if let d = UIFontDescriptor.preferredFontDescriptor(withTextStyle: .largeTitle).withDesign(.rounded)?.withSymbolicTraits(.traitBold) {
+            UINavigationBar.appearance().largeTitleTextAttributes = [.font: UIFont(descriptor: d, size: 34)]
+        }
+    }
+    private func chemistry(_ p: DateProfile) -> Int {
+        if !demo, let s = exchanges[p.id]?.score { return Int((s * 100).rounded()) }
+        let total = max(1, max(profile.interests.count, p.interests.count))
+        let ratio = Double(common(p).count) / Double(total)
+        let jitter = Double(p.id.uuidString.utf8.reduce(0) { ($0 + Int($1)) % 9 })
+        return min(98, Int((58 + 30 * ratio + (profile.lookingFor == p.lookingFor ? 8 : 0) + jitter).rounded()))
+    }
+    private var deckPeople: [DateProfile] {
+        let pool = nearby.map(\.profile).filter { p in !likes.contains(p.id) && !saved.contains { $0.id == p.id } }
+        let sharp = demo ? pool.filter { PortraitStore.hasHD($0) } : []
+        return sharp.isEmpty ? pool : sharp
+    }
+    private func swipe(_ p: DateProfile, liked: Bool) {
+        UIImpactFeedbackGenerator(style: liked ? .medium : .light).impactOccurred()
+        withAnimation(.easeIn(duration: 0.22)) { drag = CGSize(width: liked ? 620 : -620, height: drag.height + 30) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.23) {
+            drag = .zero
+            if liked { deckLike(p) } else { skip(p) }
+        }
+    }
+    private func deckLike(_ p: DateProfile) {
+        likeCount += 1
+        // Demo: every second like is mutual. Live: a match needs the other phone's like.
+        if demo && !likeCount.isMultiple(of: 2) { likes.insert(p.id); return }
+        let known = saved.contains { $0.id == p.id }
+        like(p)
+        if !known && (demo || room.incoming.contains(p.id)) {
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            withAnimation(.spring(duration: 0.4)) { matchMoment = p }
+        }
+    }
+    private func stamp(_ text: String, _ color: Color, angle: Double) -> some View {
+        Text(text).font(.system(size: 40, weight: .heavy, design: .rounded)).tracking(2)
+            .foregroundStyle(color).padding(.horizontal, 14).padding(.vertical, 4)
+            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(color, lineWidth: 4))
+            .rotationEffect(.degrees(angle)).padding(26)
+    }
+    private func roundButton(_ icon: String, _ color: Color, size: CGFloat, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon).font(.system(size: size * 0.4, weight: .bold)).foregroundStyle(color)
+                .frame(width: size, height: size).background(.white, in: Circle())
+                .shadow(color: .black.opacity(0.12), radius: 10, y: 4)
+        }.buttonStyle(.plain)
+    }
+    private var deck: some View {
+        let people = deckPeople
+        return NavigationStack {
+            VStack(spacing: 14) {
+                HStack {
+                    Image(systemName: "heart.circle.fill").foregroundStyle(rose)
+                    Text("open date").font(.system(size: 24, weight: .heavy, design: .rounded)).foregroundStyle(rose)
+                    Spacer()
+                    NavigationLink { discovery.navigationBarTitleDisplayMode(.inline) } label: {
+                        Image(systemName: "map").font(.title3.weight(.semibold)).foregroundStyle(plum.opacity(0.7))
+                    }.accessibilityLabel("Nearby map")
+                }.padding(.horizontal, 6)
+                ZStack {
+                    if people.isEmpty {
+                        VStack(spacing: 14) {
+                            Image(systemName: "heart.circle.fill").font(.system(size: 64)).foregroundStyle(rose.opacity(0.35))
+                            Text("That's everyone nearby").font(.system(.title3, design: .rounded).weight(.semibold)).foregroundStyle(plum)
+                            Button("Start over") { dismissed = []; likes = [] }.buttonStyle(.bordered).tint(rose)
+                        }
+                    }
+                    ForEach(Array(people.prefix(2).enumerated()).reversed(), id: \.element.id) { i, p in
+                        DeckCard(person: p, chemistry: chemistry(p), showAge: demo)
+                            .overlay(alignment: .topLeading) { if i == 0 { stamp("LIKE", .green, angle: -14).opacity(Double(max(0, min(1, drag.width / 90)))) } }
+                            .overlay(alignment: .topTrailing) { if i == 0 { stamp("NOPE", .red, angle: 14).opacity(Double(max(0, min(1, -drag.width / 90)))) } }
+                            .scaleEffect(i == 0 ? 1 : 0.95)
+                            .offset(i == 0 ? drag : CGSize(width: 0, height: 10))
+                            .rotationEffect(.degrees(i == 0 ? Double(drag.width) / 18 : 0))
+                            .allowsHitTesting(i == 0)
+                            .gesture(DragGesture()
+                                .onChanged { drag = $0.translation }
+                                .onEnded { v in
+                                    if abs(v.translation.width) > 110 || abs(v.predictedEndTranslation.width) > 320 { swipe(p, liked: v.translation.width > 0) }
+                                    else { withAnimation(.spring(duration: 0.3)) { drag = .zero } }
+                                })
+                    }
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
+                HStack(spacing: 44) {
+                    roundButton("xmark", Color(.systemGray), size: 64) { if let p = people.first { swipe(p, liked: false) } }
+                        .accessibilityLabel("Skip")
+                    roundButton("heart.fill", rose, size: 76) { if let p = people.first { swipe(p, liked: true) } }
+                        .accessibilityLabel("Like")
+                }.disabled(people.isEmpty).opacity(people.isEmpty ? 0.4 : 1).padding(.bottom, 10)
+            }.padding(.horizontal, 14).padding(.top, 4)
+                .background(Color(red: 0.985, green: 0.975, blue: 0.97).ignoresSafeArea())
+                .toolbar(.hidden, for: .navigationBar)
+        }
+    }
+    private func openAgents(_ p: DateProfile) {
+        withAnimation { matchMoment = nil }
+        tab = 2
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { chatMatch = p }
+    }
+    private func matchOverlay(_ p: DateProfile) -> some View {
+        let first = p.name.components(separatedBy: " ").first ?? p.name
+        return ZStack {
+            LinearGradient(colors: [Color(red: 0.93, green: 0.36, blue: 0.47), rose, plum], startPoint: .top, endPoint: .bottom).ignoresSafeArea()
+            VStack(spacing: 26) {
+                HStack { Spacer(); Button { withAnimation { matchMoment = nil } } label: { Image(systemName: "xmark").font(.title3.weight(.bold)).foregroundStyle(.white.opacity(0.8)).padding(12) }.accessibilityLabel("Close") }
+                Spacer()
+                Text("It's a match").font(.system(size: 50, weight: .heavy, design: .rounded)).foregroundStyle(.white)
+                HStack(spacing: -26) {
+                    MyAvatar(size: 138).overlay(Circle().strokeBorder(.white, lineWidth: 4))
+                    ProfilePortrait(person: p, size: 138).overlay(Circle().strokeBorder(.white, lineWidth: 4))
+                }.shadow(color: .black.opacity(0.25), radius: 18, y: 8)
+                Text("You and \(first) · \(chemistry(p))%").font(.system(.title3, design: .rounded).weight(.medium)).foregroundStyle(.white.opacity(0.9))
+                Spacer()
+                Button { openAgents(p) } label: {
+                    Label("Let your agents talk", systemImage: "bubble.left.and.bubble.right.fill")
+                        .font(.system(.title3, design: .rounded).weight(.bold)).foregroundStyle(rose)
+                        .frame(maxWidth: .infinity, minHeight: 60).background(.white, in: Capsule())
+                }.padding(.horizontal, 28).padding(.bottom, 30)
+            }
+        }.task {
+            guard UserDefaults.standard.bool(forKey: "uiShotChat") else { return }
+            try? await Task.sleep(for: .seconds(1)); openAgents(p)
+        }
+    }
     @AppStorage("openDate.selfNote") private var selfNote=""
     @AppStorage("openDate.selfReflection") private var selfReflection=""
     @AppStorage("openDate.encounterNote") private var encounterNote=""
@@ -102,16 +231,238 @@ struct OpenDateView: View {
         else { room.like(p.id); if room.incoming.contains(p.id) {remember(p)} }
         detail=nil
     }
+    // MARK: Autopilot — the agent runs the whole date pipeline; the human only approves.
+    @State private var autoStage = 0
+    @State private var autoPick = 0
+    @State private var autoRun = 0
+    @State private var autoChat: DateProfile?
+    @State private var autoPlan: DateProfile?
+    @State private var autoDebrief: DateProfile?
+
+    private var autoCandidates: [DateProfile] {
+        var pool = saved
+        if demo {
+            let crowd = Array(DemoCrowd.people.prefix(12))
+            let sharp = crowd.filter { PortraitStore.hasHD($0) }
+            pool = sharp.count >= 3 ? sharp : crowd
+        }
+        var ranked = pool.sorted { (chemistry($0), $0.name) > (chemistry($1), $1.name) }
+        // Demo story: Remy is the record-fair match, so lead with Remy.
+        if demo, let i = ranked.firstIndex(where: { $0.id == DateProfile.examples[2].id }) { ranked.insert(ranked.remove(at: i), at: 0) }
+        return Array(ranked.prefix(3))
+    }
+    private var autoPerson: DateProfile? {
+        let c = autoCandidates
+        return c.isEmpty ? nil : c[autoPick % c.count]
+    }
+    private func autoPlanKey(_ p: DateProfile) -> String { "openDate.datePlan." + p.id.uuidString }
+    private func autoStoredPlan(_ p: DateProfile) -> (place: String, time: Date)? {
+        guard let d = UserDefaults.standard.dictionary(forKey: autoPlanKey(p)),
+              let time = d["time"] as? Date, let place = d["place"] as? String else { return nil }
+        return (place, time)
+    }
+    private func autoPlanLabel(_ p: DateProfile) -> String {
+        guard let plan = autoStoredPlan(p) else { return "Plan drafted" }
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = Calendar.current.component(.minute, from: plan.time) == 0 ? "EEE ha" : "EEE h:mma"
+        let when = f.string(from: plan.time).replacingOccurrences(of: "AM", with: "am").replacingOccurrences(of: "PM", with: "pm")
+        return plan.place + " · " + when
+    }
+    private func autoDraftDemoPlan(_ p: DateProfile) {
+        guard demo else { return }
+        let places = ["Record fair", "Ruby Wine, Potrero Hill", "Sunset walk, Ocean Beach"]
+        let saturday = Calendar.current.nextDate(after: Date(), matching: DateComponents(hour: 14, weekday: 7), matchingPolicy: .nextTime) ?? Date().addingTimeInterval(6 * 86400)
+        UserDefaults.standard.set(["place": places[autoPick % places.count], "time": saturday, "confirmed": false], forKey: autoPlanKey(p))
+    }
+    private func autoAdvance() async {
+        guard let p = autoPerson else { return }
+        if autoStage < 3 { autoDraftDemoPlan(p) }
+        while autoStage < 3 {
+            do { try await Task.sleep(for: .seconds(autoStage == 0 ? 1.1 : 0.95)) } catch { return }
+            withAnimation(.spring(response: 0.5, dampingFraction: 0.78)) { autoStage += 1 }
+            UIImpactFeedbackGenerator(style: autoStage == 3 ? .medium : .soft).impactOccurred()
+        }
+        // Screenshot/test hooks (launch arguments only).
+        if UserDefaults.standard.bool(forKey: "uiShotAutoConfirm"), autoStage == 3 { autoConfirm(p) }
+        switch UserDefaults.standard.string(forKey: "uiShotAutoSheet") {
+        case "chat": autoChat = p
+        case "plan": autoPlan = p
+        case "debrief": autoDebrief = p
+        default: break
+        }
+    }
+    private func autoConfirm(_ p: DateProfile) {
+        guard let plan = autoStoredPlan(p) else { autoPlan = p; return }
+        UserDefaults.standard.set(["place": plan.place, "time": plan.time, "confirmed": true], forKey: autoPlanKey(p))
+        remember(p)
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        withAnimation(.spring(response: 0.5, dampingFraction: 0.75)) { autoStage = 4 }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+            guard autoStage == 4 else { return }
+            withAnimation(.spring(response: 0.5, dampingFraction: 0.78)) { autoStage = 5 }
+            UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+        }
+    }
+    private func autoRow(_ index: Int, icon: String, doing: String, done: String, action: (() -> Void)? = nil, @ViewBuilder trailing: () -> some View = { EmptyView() }) -> some View {
+        let finished = autoStage > index
+        return Button { action?() } label: {
+            HStack(spacing: 14) {
+                Image(systemName: icon).font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(finished ? .white : rose)
+                    .frame(width: 40, height: 40)
+                    .background(finished ? rose : rose.opacity(0.12), in: Circle())
+                Text(finished ? done : doing)
+                    .font(.system(.headline, design: .rounded))
+                    .foregroundStyle(finished ? plum : plum.opacity(0.55))
+                    .lineLimit(1).minimumScaleFactor(0.75)
+                Spacer(minLength: 4)
+                if finished {
+                    trailing()
+                    if action != nil { Image(systemName: "chevron.right").font(.footnote.weight(.bold)).foregroundStyle(plum.opacity(0.25)) }
+                } else {
+                    ProgressView().tint(rose)
+                }
+            }.padding(.vertical, 9).contentShape(Rectangle())
+        }.buttonStyle(.plain).disabled(!finished || action == nil)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+    }
+    private var autopilot: some View {
+        let person = autoPerson
+        let candidates = autoCandidates
+        return NavigationStack {
+            ScrollViewReader { reader in
+                ScrollView {
+                    VStack(spacing: 16) {
+                        HStack {
+                            Image(systemName: "heart.circle.fill").foregroundStyle(rose)
+                            Text("open date").font(.system(size: 24, weight: .heavy, design: .rounded)).foregroundStyle(rose)
+                            Spacer()
+                            Button {
+                                autoPick = 0
+                                withAnimation(.spring(duration: 0.3)) { autoStage = 0 }
+                                autoRun += 1
+                            } label: {
+                                Image(systemName: "arrow.counterclockwise").font(.body.weight(.semibold)).foregroundStyle(plum.opacity(0.45))
+                            }.accessibilityLabel("Replay")
+                        }.padding(.horizontal, 6)
+                        Color(red: 0.96, green: 0.90, blue: 0.92).frame(height: 220)
+                            .overlay {
+                                if let person, let photo = PortraitStore.image(person) {
+                                    Image(uiImage: photo).resizable().scaledToFill().id(person.id).transition(.opacity)
+                                } else {
+                                    Image(systemName: "sparkles").font(.system(size: 80)).foregroundStyle(rose.opacity(0.3))
+                                }
+                            }
+                            .clipped()
+                            .overlay(LinearGradient(colors: [.clear, .black.opacity(0.72)], startPoint: .center, endPoint: .bottom))
+                            .overlay(alignment: .bottomLeading) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Your agent is dating for you").font(.system(size: 24, weight: .heavy, design: .rounded))
+                                    Text("You only approve.").font(.system(.subheadline, design: .rounded).weight(.medium)).opacity(0.9)
+                                }.foregroundStyle(.white).padding(18)
+                            }
+                            .overlay(alignment: .topTrailing) {
+                                if let person, autoStage >= 2 {
+                                    Label("\(chemistry(person))% · " + (person.name.split(separator: " ").first.map(String.init) ?? person.name), systemImage: "sparkles")
+                                        .font(.system(.subheadline, design: .rounded).weight(.bold)).foregroundStyle(rose)
+                                        .padding(.horizontal, 12).padding(.vertical, 7)
+                                        .background(.white, in: Capsule()).padding(14)
+                                        .transition(.scale.combined(with: .opacity))
+                                }
+                            }
+                            .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+                            .shadow(color: .black.opacity(0.12), radius: 14, y: 6)
+                        VStack(spacing: 0) {
+                            autoRow(0, icon: "bubble.left.and.bubble.right.fill",
+                                    doing: person == nil ? "Looking for people nearby…" : "Agents talking…",
+                                    done: "Met \(demo ? 12 : max(nearby.count, candidates.count)) agents",
+                                    action: { autoChat = person })
+                            if autoStage >= 1 {
+                                autoRow(1, icon: "checkmark.shield.fill", doing: "Vetting…",
+                                        done: "\(candidates.count) strong match" + (candidates.count == 1 ? "" : "es"),
+                                        action: { autoChat = person }) {
+                                    HStack(spacing: -10) {
+                                        ForEach(candidates) { c in
+                                            ProfilePortrait(person: c, size: 30).opacity(c.id == person?.id ? 1 : 0.55)
+                                        }
+                                    }
+                                }
+                            }
+                            if autoStage >= 2, let person {
+                                autoRow(2, icon: "calendar", doing: "Agreeing on a plan…", done: autoPlanLabel(person),
+                                        action: { autoPlan = person })
+                            }
+                            if autoStage == 3, let person {
+                                VStack(spacing: 10) {
+                                    HStack(spacing: 14) {
+                                        ProfilePortrait(person: person, size: 40)
+                                        Text("Waiting for you").font(.system(.headline, design: .rounded)).foregroundStyle(plum)
+                                        Spacer()
+                                    }
+                                    Button { autoConfirm(person) } label: {
+                                        Text("Confirm date").font(.system(.title3, design: .rounded).weight(.bold))
+                                            .frame(maxWidth: .infinity).padding(.vertical, 15)
+                                            .background(rose, in: Capsule()).foregroundStyle(.white)
+                                    }
+                                    Button {
+                                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                        autoPick += 1
+                                        withAnimation(.spring(response: 0.45, dampingFraction: 0.8)) { autoStage = 1 }
+                                        autoRun += 1
+                                    } label: {
+                                        Text("Not this one").font(.system(.subheadline, design: .rounded).weight(.semibold)).foregroundStyle(plum.opacity(0.55)).padding(.vertical, 4)
+                                    }
+                                }.buttonStyle(.plain).padding(.vertical, 9)
+                                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                            }
+                            if autoStage >= 4, let person {
+                                autoRow(3, icon: "hand.thumbsup.fill", doing: "", done: "Plan confirmed", action: { autoPlan = person }) {
+                                    Text("Planned").font(.system(.caption, design: .rounded).weight(.bold)).foregroundStyle(rose)
+                                        .padding(.horizontal, 9).padding(.vertical, 4).background(rose.opacity(0.12), in: Capsule())
+                                }
+                            }
+                            if autoStage >= 5, let person {
+                                autoRow(4, icon: "mic.fill", doing: "", done: "After the date: tap to debrief", action: { autoDebrief = person })
+                            }
+                            Color.clear.frame(height: 1).id("autoEnd")
+                        }.padding(.horizontal, 16).padding(.vertical, 8)
+                            .background(.white, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+                            .shadow(color: .black.opacity(0.06), radius: 12, y: 4)
+                    }.padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 24)
+                }.background(Color(red: 0.985, green: 0.965, blue: 0.97))
+                    .onChange(of: autoStage) { withAnimation(.spring(duration: 0.4)) { reader.scrollTo("autoEnd", anchor: .bottom) } }
+            }
+            .toolbar(.hidden, for: .navigationBar)
+            .task(id: autoRun) { await autoAdvance() }
+            .sheet(item: $autoChat) { p in
+                NavigationStack { agentConversation(p).toolbar { Button("Done") { autoChat = nil } } }
+            }
+            .sheet(item: $autoPlan) { p in MatchDatePlanner(person: p, demo: demo) }
+            .sheet(item: $autoDebrief) { p in
+                NavigationStack {
+                    let plan = autoStoredPlan(p)
+                    DateDebrief(date: ReviewDate(id: autoPlanKey(p), person: p, time: plan?.time ?? Date(), place: plan?.place ?? "Date"), demo: demo)
+                        .toolbar { Button("Done") { autoDebrief = nil } }
+                }
+            }
+        }
+    }
     var body: some View {
         TabView(selection:$tab) {
-            discovery.tabItem{Label("Discover",systemImage:"dot.radiowaves.left.and.right")}.tag(0)
-            secondYou.tabItem{Label("Second You",systemImage:"person.text.rectangle")}.tag(1)
-            matches.tabItem{Label("Matches",systemImage:"heart")}.tag(2)
-            settings.tabItem{Label("Settings",systemImage:"gearshape")}.tag(3)
+            autopilot.tabItem{Image(systemName:"sparkles").accessibilityLabel("Autopilot")}.tag(3)
+            deck.tabItem{Image(systemName:"rectangle.stack.fill").accessibilityLabel("Browse")}.tag(0)
+            matches.tabItem{Image(systemName:"heart.fill").accessibilityLabel("Matches")}.tag(2)
+            secondYou.tabItem{Image(systemName:"person.fill").accessibilityLabel("You")}.tag(1)
         }.tint(rose).preferredColorScheme(.light)
+        .overlay { if let p = matchMoment { matchOverlay(p).transition(.opacity.combined(with: .scale(scale: 1.08))) } }
         .task(id: saved.map(\.id)) { await prepareExchanges() }
         .onChange(of:room.incoming){ ids in
-            for p in nearby.map(\.profile) where ids.contains(p.id) && likes.contains(p.id) {remember(p)}
+            for p in nearby.map(\.profile) where ids.contains(p.id) && likes.contains(p.id) {
+                let fresh = !saved.contains { $0.id == p.id }
+                remember(p)
+                if fresh { withAnimation(.spring(duration: 0.4)) { matchMoment = p } }
+            }
         }
         .sheet(item: $directory, onDismiss: {
             if let person = directorySelection { detail = person; directorySelection = nil }
@@ -249,32 +600,31 @@ struct OpenDateView: View {
     private var matches: some View {
         NavigationStack {
             List {
-                if saved.isEmpty { Text("When you both like each other, your agents can start a conversation here.") }
+                if saved.isEmpty {
+                    VStack(spacing: 10) {
+                        Image(systemName: "heart.circle.fill").font(.system(size: 56)).foregroundStyle(rose.opacity(0.3))
+                        Text("No matches yet").font(.system(.headline, design: .rounded)).foregroundStyle(.secondary)
+                    }.frame(maxWidth: .infinity).padding(.vertical, 60).listRowSeparator(.hidden)
+                }
                 ForEach(saved) { person in
-                    VStack(alignment: .leading, spacing: 10) {
-                        Button { chatMatch = person } label: {
-                            HStack(spacing: 12) {
-                                ProfilePortrait(person: person, size: 52)
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(person.name).font(.headline)
-                                    Text(person.interests.joined(separator: " · "))
-                                        .font(.subheadline).foregroundStyle(.secondary)
-                                }
-                                Spacer()
-                            }.contentShape(Rectangle())
-                        }.buttonStyle(.plain)
-                        HStack(spacing: 10) {
-                            Button { chatMatch = person } label: { Label("Chat", systemImage: "bubble.left.and.bubble.right") }
-                            Button { find(person) } label: { Label("Find", systemImage: "location") }
-                            Spacer(minLength: 0)
-                            let hasHistory = pastDates.contains { $0.person.id == person.id }
-                            Button(hasHistory ? "Analyze date" : "Arrange date") {
-                                if hasHistory { reviewingMatch = person } else { planningMatch = person }
-                            }
-                                .buttonStyle(.borderedProminent)
-                        }.font(.subheadline.weight(.medium)).buttonStyle(.borderless)
-                            .controlSize(.regular)
-                    }.padding(.vertical, 6)
+                    let hasHistory = pastDates.contains { $0.person.id == person.id }
+                    HStack(spacing: 14) {
+                        ProfilePortrait(person: person, size: 68)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(person.name).font(.system(.title3, design: .rounded).weight(.semibold))
+                            Text(person.interests.joined(separator: " · ")).font(.subheadline).foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength: 0)
+                        Button { find(person) } label: {
+                            Image(systemName: "location.fill").frame(width: 42, height: 42).background(rose.opacity(0.1), in: Circle())
+                        }.accessibilityLabel("Find " + person.name)
+                        Button { if hasHistory { reviewingMatch = person } else { planningMatch = person } } label: {
+                            Image(systemName: hasHistory ? "sparkles" : "calendar").foregroundStyle(.white)
+                                .frame(width: 42, height: 42).background(rose, in: Circle())
+                        }.accessibilityLabel(hasHistory ? "Analyze date" : "Arrange date")
+                    }.buttonStyle(.borderless).padding(.vertical, 8)
+                        .contentShape(Rectangle()).onTapGesture { chatMatch = person }
+                        .listRowSeparator(.hidden)
                 }.onDelete { offsets in
                     for index in offsets {
                         let id = saved[index].id
@@ -288,7 +638,7 @@ struct OpenDateView: View {
                         UserDefaults.standard.set(try? JSONEncoder().encode(liveSaved), forKey: "openDate.matches")
                     }
                 }
-            }.navigationTitle("Matches")
+            }.listStyle(.plain).navigationTitle("Matches")
                 .onAppear(perform: refreshDates)
                 .onChange(of: saved) { refreshDates() }
                 .sheet(item: $reviewingMatch) { person in
@@ -313,14 +663,14 @@ struct OpenDateView: View {
     private func agentConversation(_ person: DateProfile) -> some View {
         let exchange = demo ? AgentExchange.suggested(profile, person) : exchanges[person.id]
         let lines = exchange?.lines ?? partial[person.id] ?? []
-        let pink = Color(red: 1, green: 0.64, blue: 0.83)
+        let pink = rose
         return ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 HStack {
                     ProfilePortrait(person: person, size: 48)
                     VStack(alignment: .leading) {
-                        Text("Match with " + person.name).font(.title2.bold())
-                        Text(exchange == nil ? "Your agents are talking…" : exchange?.onDevice == true ? "On-device agent conversation" : "Profile-based demo conversation").font(.caption)
+                        Text(person.name).font(.system(.title2, design: .rounded).bold())
+                        Text(exchange == nil ? "Agents talking…" : exchange?.onDevice == true ? "On-device agents" : "Demo agents").font(.caption).foregroundStyle(.secondary)
                         if let e = exchange, let score = e.score {
                             Text("Chemistry \(Int((score * 100).rounded()))%" + (e.low.map { " · likely \(Int($0 * 100))% to \(Int((e.high ?? $0) * 100))%" } ?? "")).font(.caption.bold()).foregroundStyle(pink)
                             if e.clash == true { Text("A hard no came up, so Second You held back").font(.caption) }
@@ -338,7 +688,7 @@ struct OpenDateView: View {
                                 VStack(alignment: .leading, spacing: 5) {
                                     Text((mine ? profile.name : person.name) + "’s agent").font(.caption.bold()).foregroundStyle(pink)
                                     Text(lines[i]).font(.subheadline)
-                                }.padding(12).background(mine ? Color(red: 0.32, green: 0.18, blue: 0.31) : Color(red: 0.20, green: 0.16, blue: 0.24), in: RoundedRectangle(cornerRadius: 16))
+                                }.padding(12).background(mine ? rose.opacity(0.12) : Color(.systemGray6), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                                 if !mine { Spacer(minLength: 28) }
                             }
                         }
@@ -347,7 +697,7 @@ struct OpenDateView: View {
                 if exchange == nil { ProgressView().tint(pink) }
 
             }.padding(18).frame(maxWidth: .infinity, alignment: .leading)
-        }.background(Color(red: 0.095, green: 0.065, blue: 0.12)).foregroundStyle(.white)
+        }.background(Color.white).foregroundStyle(plum)
             .navigationBarTitleDisplayMode(.inline)
     }
     private var secondYou: some View {
@@ -358,16 +708,15 @@ struct OpenDateView: View {
         return NavigationStack {
             Form {
                 Section {
-                    HStack(spacing: 12) {
-                        MyAvatar()
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(profile.name).font(.headline)
-                            if let bio = profile.personality, !bio.isEmpty { Text(bio).font(.subheadline) }
-                        }
-                    }
+                    VStack(spacing: 10) {
+                        Button { editing = true } label: { MyAvatar(size: 104) }.buttonStyle(.plain)
+                        Text(profile.name).font(.system(.title, design: .rounded).bold()).foregroundStyle(plum)
+                        Text(profile.interests.joined(separator: " · ")).font(.subheadline).foregroundStyle(.secondary)
+                    }.frame(maxWidth: .infinity).listRowBackground(Color.clear)
+                }
+                Section {
                     if let job = profile.occupation, !job.isEmpty { LabeledContent("Work", value: job) }
                     if let school = profile.education, !school.isEmpty { LabeledContent("Education", value: school) }
-                    LabeledContent("Interests", value: profile.interests.joined(separator: " · "))
                     DisclosureGroup("In my own words") {
                         TextField("What do you enjoy or value?", text: input, axis: .vertical)
                         Button(working ? "Building portrait…" : "Build my portrait") {
@@ -380,23 +729,23 @@ struct OpenDateView: View {
                         }.disabled(working || input.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         if !portrait.wrappedValue.isEmpty { Text(portrait.wrappedValue).font(.subheadline) }
                     }
-                } header: { Text("About Me").font(.title2.bold()).textCase(nil).foregroundStyle(plum) }
+                } header: { Label("About", systemImage: "person.fill") }
                 Section {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Who I’d like to meet").font(.subheadline.bold())
-                        TextField("What qualities matter to you in a partner?", text: partner, axis: .vertical)
+                        TextField("Qualities that matter", text: partner, axis: .vertical)
                     }.padding(.vertical, 4)
                     LabeledContent("Looking for", value: profile.lookingFor)
                     VStack(alignment: .leading, spacing: 8) {
                         Text("My kind of first date").font(.subheadline.bold())
-                        TextField("Where would you go, and what would you do together?", text: ideal, axis: .vertical)
+                        TextField("Where, and doing what?", text: ideal, axis: .vertical)
                             .font(.body)
                     }.padding(.vertical, 4)
-                } header: { Text("My Ideal Date").font(.title2.bold()).textCase(nil).foregroundStyle(plum) }
+                } header: { Label("Ideal date", systemImage: "heart.fill") }
                 Section {
                     let t = learnedTick >= 0 ? SecondYouTraining.traits() : SecondYouTraining.Traits()
                     if t.lines == 0 {
-                        Text("Write a few things in your own words above and tap Build my portrait. Second You learns from them right here on your phone.").font(.subheadline)
+                        Text("Add a note above to train Second You.").font(.subheadline).foregroundStyle(.secondary)
                     } else {
                         LabeledContent("Learned from", value: "\(t.lines) things you said")
                         LabeledContent("Your style", value: "about \(t.avgWords) words, questions \(t.asksQuestions)% of the time")
@@ -404,14 +753,19 @@ struct OpenDateView: View {
                     }
                     VStack(alignment: .leading, spacing: 8) {
                         Text("My hard nos").font(.subheadline.bold())
-                        TextField("Things your agent should never compromise on", text: $hardNos, axis: .vertical)
+                        TextField("Never compromise on…", text: $hardNos, axis: .vertical)
                             .onChange(of: hardNos) { _, v in SecondYouTraining.setHardNos(v) }
                     }.padding(.vertical, 4)
-                    Text("Trained and stored only on this iPhone. Your notes and hard nos never get uploaded.").font(.caption).foregroundStyle(.secondary)
-                    Button("Forget what Second You learned", role: .destructive) { SecondYouTraining.wipe(); hardNos = ""; learnedTick += 1 }
-                } header: { Text("What Second You Learned").font(.title2.bold()).textCase(nil).foregroundStyle(plum) }
-            }.navigationTitle("Second You")
-                .toolbar { Button("Edit profile") { editing = true } }
+                    Label("Stays on this iPhone", systemImage: "lock.fill").font(.caption).foregroundStyle(.secondary)
+                    Button("Forget what it learned", role: .destructive) { SecondYouTraining.wipe(); hardNos = ""; learnedTick += 1 }
+                } header: { Label("Second You", systemImage: "sparkles") }
+                Section {
+                    Button { editing = true } label: { Label("Edit profile", systemImage: "pencil") }
+                    Button {
+                        if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+                    } label: { Label("Permissions", systemImage: "gearshape") }
+                } header: { Label("Settings", systemImage: "gearshape.fill") }
+            }.navigationTitle("You")
         }
     }
     private var discovery: some View {
@@ -750,10 +1104,8 @@ private struct ProfilePortrait: View {
     let size: CGFloat
 
     var body: some View {
-        let index = DemoCrowd.indices[person.id]
-        let resource = index.map { $0 < 3 ? DateProfile.examples[$0].name.lowercased() : "guest" + String($0 - 3) } ?? (person.id == DemoBuilding.noor.id ? "noor" : "")
         Group {
-            if !resource.isEmpty, let photo = UIImage(named: "Portraits/" + resource + ".jpg") {
+            if let photo = PortraitStore.image(person) {
                 Image(uiImage: photo).resizable().scaledToFill()
             } else {
                 Image(systemName: "person.crop.circle.fill").resizable().foregroundStyle(.teal, .white)
@@ -764,7 +1116,65 @@ private struct ProfilePortrait: View {
     }
 }
 
+private enum PortraitStore {
+    static func resource(_ person: DateProfile) -> String {
+        DemoCrowd.indices[person.id].map { $0 < 3 ? DateProfile.examples[$0].name.lowercased() : "guest" + String($0 - 3) } ?? (person.id == DemoBuilding.noor.id ? "noor" : "")
+    }
+    private static var hd: [String: Bool] = [:]
+    static func hasHD(_ person: DateProfile) -> Bool {
+        let r = resource(person)
+        if r.isEmpty { return false }
+        if let known = hd[r] { return known }
+        let found = Bundle.main.path(forResource: "hd_" + r, ofType: "jpg", inDirectory: "Portraits") != nil
+        hd[r] = found
+        return found
+    }
+    static func image(_ person: DateProfile) -> UIImage? {
+        let r = resource(person)
+        if r.isEmpty { return nil }
+        return (hasHD(person) ? UIImage(named: "Portraits/hd_" + r + ".jpg") : nil) ?? UIImage(named: "Portraits/" + r + ".jpg")
+    }
+}
+
+private struct DeckCard: View {
+    let person: DateProfile
+    let chemistry: Int
+    let showAge: Bool
+    var body: some View {
+        let first = person.name.components(separatedBy: " ").first ?? person.name
+        let age = 24 + (DemoCrowd.indices[person.id] ?? 0) * 5 % 9
+        return GeometryReader { g in
+            ZStack(alignment: .bottomLeading) {
+                if let photo = PortraitStore.image(person) {
+                    Image(uiImage: photo).resizable().interpolation(.high).scaledToFill()
+                        .frame(width: g.size.width, height: g.size.height).clipped()
+                } else {
+                    LinearGradient(colors: [Color(red: 0.93, green: 0.55, blue: 0.62), Color(red: 0.64, green: 0.18, blue: 0.31)], startPoint: .top, endPoint: .bottom)
+                    Text(String(first.prefix(1))).font(.system(size: 140, weight: .heavy, design: .rounded)).foregroundStyle(.white.opacity(0.35))
+                        .frame(width: g.size.width, height: g.size.height)
+                }
+                LinearGradient(colors: [.clear, .black.opacity(0.78)], startPoint: .center, endPoint: .bottom)
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        Text(first).font(.system(size: 36, weight: .bold, design: .rounded))
+                        if showAge { Text(String(age)).font(.system(size: 28, weight: .regular, design: .rounded)) }
+                    }
+                    Text(person.interests.joined(separator: " · ")).font(.system(.headline, design: .rounded)).opacity(0.92)
+                }.foregroundStyle(.white).padding(22)
+            }
+            .overlay(alignment: .top) {
+                Label("\(chemistry)% match", systemImage: "sparkles").font(.system(.subheadline, design: .rounded).weight(.bold))
+                    .foregroundStyle(.white).padding(.horizontal, 12).padding(.vertical, 7)
+                    .background(.ultraThinMaterial.opacity(0.9), in: Capsule()).environment(\.colorScheme, .dark).padding(14)
+            }
+        }.clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+            .shadow(color: .black.opacity(0.16), radius: 14, y: 6)
+            .accessibilityElement(children: .combine)
+    }
+}
+
 private struct MyAvatar: View {
+    var size: CGFloat = 40
     @AppStorage("openDate.avatarBytes") private var bytes = Data()
     var body: some View {
         Group {
@@ -773,8 +1183,8 @@ private struct MyAvatar: View {
             } else {
                 Image(systemName: "person.crop.circle.fill").resizable().foregroundStyle(.teal, .white)
             }
-        }.frame(width: 40, height: 40).clipShape(Circle())
-            .overlay(Circle().stroke(.white, lineWidth: 2)).shadow(radius: 2).accessibilityLabel("Your location")
+        }.frame(width: size, height: size).clipShape(Circle())
+            .overlay(Circle().stroke(.white, lineWidth: 2)).shadow(radius: 2).accessibilityLabel("You")
     }
 }
 
@@ -992,7 +1402,6 @@ private struct MatchDatePlanner: View {
                         } else {
                             ProgressView().tint(pink)
                             Text("Finding a time for two…").font(.system(.title, design: .serif).bold())
-                            Text("Your agent is checking evening slots against your saved date plans.")
                         }
                     }.padding(20).frame(maxWidth: .infinity, alignment: .leading)
                         .background(.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 22))
@@ -1171,11 +1580,11 @@ private struct DateDebrief: View {
                         .font(.subheadline.monospacedDigit()).foregroundStyle(pink)
                 }
             }
-            Text("Your Second You listens with this iPhone's microphone and turns the conversation into notes. Speech is transcribed on the device and the audio is never saved.")
+            Text("Transcribed on this iPhone. Audio is never saved.")
                 .font(.footnote).foregroundStyle(.white.opacity(0.7))
             if !recorder.recording {
                 Toggle(isOn: $bothAgreed) {
-                    Text("\(date.person.name) and I both agreed to record").font(.subheadline)
+                    Text("We both agreed to record").font(.subheadline)
                 }.tint(pink)
             }
             if recorder.recording {
