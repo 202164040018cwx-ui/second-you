@@ -1,0 +1,22 @@
+project:
+    id: b5f599a8-cf85-4857-bfee-3c82849d28ba
+session:
+    idle_timeout_seconds: 1800
+build:
+    framework: ios
+    profiles:
+        preview:
+            ios:
+                app_id: "75101752-7e18-42a9-a7c6-a705d7706f46"
+                build_commands:
+                    - xcodebuild -project 'OpenDate.xcodeproj' -scheme 'OpenDate' -configuration Debug -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' ARCHS=arm64 CODE_SIGNING_ALLOWED=NO -derivedDataPath build
+                output_path: build/Build/Products/Debug-iphonesimulator/*.app
+pr_review:
+    enabled: true
+    build:
+        kind: revyl
+        profile: preview
+    proof_of_changes:
+        enabled: true
+        harness:
+            kind: revyl
