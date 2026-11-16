@@ -8,7 +8,6 @@ struct OpenDateView: View {
     private let plum = Color(red:0.22, green:0.10, blue:0.17)
     private let rose = Color(red:0.64, green:0.18, blue:0.31)
     @Environment(\.scenePhase) private var scenePhase
-    @StateObject private var vexo = VexoSignal()
     @StateObject private var room = NearbyRoom()
     @State private var roomOnly = false
     @State private var floorCode = ""
@@ -90,7 +89,7 @@ struct OpenDateView: View {
     }
     private func leave() { likes=[]; open=false; instant=false; banner=nil; selected=nil; dismissed=[]; alerted=[]; room.stop() }
     private func find(_ p:DateProfile) { banner=nil; distance=0.35; selected=p }
-    private func skip(_ p:DateProfile) { vexo.send(.reject, to: p.name); dismissed.insert(p.id); banner=nil; selected=nil }
+    private func skip(_ p:DateProfile) { dismissed.insert(p.id); banner=nil; selected=nil }
     private func remember(_ p:DateProfile) {
         guard !saved.contains(where:{$0.id==p.id}) else { return }
         if demo { demoSaved.append(p); return }
@@ -98,7 +97,6 @@ struct OpenDateView: View {
         UserDefaults.standard.set(try? JSONEncoder().encode(liveSaved),forKey:"openDate.matches")
     }
     private func like(_ p:DateProfile) {
-        vexo.send(.accept, to: p.name)
         likes.insert(p.id)
         if demo { remember(p) }
         else { room.like(p.id); if room.incoming.contains(p.id) {remember(p)} }
@@ -111,9 +109,6 @@ struct OpenDateView: View {
             matches.tabItem{Label("Matches",systemImage:"heart")}.tag(2)
             settings.tabItem{Label("Settings",systemImage:"gearshape")}.tag(3)
         }.tint(rose).preferredColorScheme(.light)
-        .task(id: scenePhase == .active ? profile.name : "") {
-            if scenePhase == .active { await vexo.connect(name: profile.name) }
-        }
         .task(id: saved.map(\.id)) { await prepareExchanges() }
         .onChange(of:room.incoming){ ids in
             for p in nearby.map(\.profile) where ids.contains(p.id) && likes.contains(p.id) {remember(p)}
@@ -240,8 +235,6 @@ struct OpenDateView: View {
     private var settings: some View {
         NavigationStack {
             List {
-                LabeledContent("Vexo Signal", value: vexo.status)
-                if let delivery = vexo.delivery { Text(delivery).font(.footnote) }
                 Button("Edit profile") { editing = true }
                 Button("Location and notification permissions") {
                     if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
@@ -1069,12 +1062,15 @@ private struct DateDebrief: View {
         var rating = 0
         var interest = "Unsure"
         var verdict: DateVerdict?
+        var transcript: String?
     }
     let date: ReviewDate
     let demo: Bool
     @State private var review: Reflection
     @State private var busy = false
     @State private var planning = false
+    @State private var bothAgreed = false
+    @StateObject private var recorder = DateRecorder()
     @FocusState private var typing: Bool
     private var key: String { "openDate.review." + date.id }
     init(date: ReviewDate, demo: Bool) {
@@ -1098,6 +1094,7 @@ private struct DateDebrief: View {
                             Text(date.place).font(.subheadline).foregroundStyle(.white.opacity(0.75))
                         }
                     }
+                    recordCard
                     VStack(alignment: .leading, spacing: 12) {
                         Text("Share your idea").font(.headline)
                         TextField("", text: Binding(get: { review.idea ?? "" }, set: {
@@ -1124,7 +1121,7 @@ private struct DateDebrief: View {
                         typing = false
                         busy = true
                         Task {
-                            review.verdict = await DateCoach.verdict([review.idea ?? ""], rating: review.rating)
+                            review.verdict = await DateCoach.verdict([review.idea ?? "", review.transcript.map { "What we said on the date: " + $0 } ?? ""].filter { !$0.isEmpty }, rating: review.rating)
                             save(); busy = false
                             withAnimation { reader.scrollTo("summary", anchor: .center) }
                         }
@@ -1150,5 +1147,58 @@ private struct DateDebrief: View {
             .foregroundStyle(.white).navigationTitle("Analyze Date").navigationBarTitleDisplayMode(.inline)
             .toolbarColorScheme(.dark, for:.navigationBar)
             .sheet(isPresented:$planning) { MatchDatePlanner(person:date.person, demo:demo, followUpID: String(Int(date.time.timeIntervalSince1970))) }
+            .onChange(of: recorder.transcript) { text in
+                guard !text.isEmpty else { return }
+                review.transcript = text; review.verdict = nil; save()
+            }
+            .onDisappear { recorder.stop() }
+    }
+
+    private var recordCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Image(systemName: recorder.recording ? "waveform" : "mic.fill").foregroundStyle(pink)
+                Text("Record the date").font(.headline)
+                Spacer()
+                if recorder.recording {
+                    Text(Duration.seconds(Int(recorder.elapsed)).formatted(.time(pattern: .minuteSecond)))
+                        .font(.subheadline.monospacedDigit()).foregroundStyle(pink)
+                }
+            }
+            Text("Your Second You listens with this iPhone's microphone and turns the conversation into notes. Speech is transcribed on the device and the audio is never saved.")
+                .font(.footnote).foregroundStyle(.white.opacity(0.7))
+            if !recorder.recording {
+                Toggle(isOn: $bothAgreed) {
+                    Text("\(date.person.name) and I both agreed to record").font(.subheadline)
+                }.tint(pink)
+            }
+            if recorder.recording {
+                GeometryReader { g in
+                    Capsule().fill(.white.opacity(0.12)).overlay(alignment: .leading) {
+                        Capsule().fill(pink).frame(width: max(8, g.size.width * CGFloat(recorder.level)))
+                    }
+                }.frame(height: 6).animation(.easeOut(duration: 0.1), value: recorder.level)
+            }
+            Button {
+                typing = false
+                if recorder.recording { recorder.stop() } else { Task { await recorder.start() } }
+            } label: {
+                Label(recorder.recording ? "Stop recording" : "Start recording", systemImage: recorder.recording ? "stop.fill" : "record.circle")
+                    .fontWeight(.semibold).frame(maxWidth: .infinity, minHeight: 48)
+                    .foregroundStyle(recorder.recording ? .white : .black)
+                    .background(recorder.recording ? Color.red.opacity(0.85) : pink, in: RoundedRectangle(cornerRadius: 14))
+            }.disabled(!bothAgreed && !recorder.recording).opacity(!bothAgreed && !recorder.recording ? 0.5 : 1)
+            Text(recorder.status).font(.caption).foregroundStyle(.white.opacity(0.6))
+            if let text = review.transcript, !text.isEmpty {
+                Divider().overlay(.white.opacity(0.2))
+                Text("Transcript").font(.subheadline.bold())
+                Text(text).font(.callout).textSelection(.enabled)
+                if !recorder.recording {
+                    Button("Delete transcript", role: .destructive) { review.transcript = nil; review.verdict = nil; save() }
+                        .font(.footnote)
+                }
+            }
+        }.padding(18).frame(maxWidth: .infinity, alignment: .leading)
+            .background(.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 18))
     }
 }

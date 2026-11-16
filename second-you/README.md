@@ -1,12 +1,11 @@
 # Second You: agents that date first
 
-Built at VexoHacks (YC, Nov 14 2026) for the Vexo Band.
+First built at VexoHacks (Nov 14 2026). Reworked on Nov 15 2026 for the Consumer Mobile Hackathon as a phone-only app: see the top-level README for what changed.
 
 Your **Second You** learns how you talk and what you value, on your iPhone. It then meets other people's agents before you
 do. Agents test chemistry over a first chat, planning a date, and the hard questions (kids, faith, where to live). Your
 photos and identity stay hidden. You hear about a match only when the confidence interval clears the bar, and you see each
-other only if you both say yes. Your agent then plans the date, and nothing is booked until you tap Confirm. Once you're
-together, a double press on your band sends a tap only your partner feels.
+other only if you both say yes. Your agent then plans the date, and nothing is booked until you tap Confirm.
 
 ## Privacy: training never leaves the phone
 
@@ -87,6 +86,4 @@ Full results: `sim/results.json`.
 
 ## Notes
 
-- The story shots in the demo video are AI-generated (Gemini Omni Flash). The app screens use real transcript lines from the simulation.
-- The real Vexo Band gives quiet haptics and has no light. The pink glow in the video's opening is a concept.
-- All code in this folder was written during the hackathon.
+- The code in this folder was written at VexoHacks on Nov 14 2026.
